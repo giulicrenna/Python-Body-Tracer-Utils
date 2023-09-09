@@ -1,0 +1,4 @@
+.venv
+*.csv
+src/tempCodeRunnerFile.py
+*.pyc
