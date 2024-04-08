@@ -1,6 +1,4 @@
 opencv-python
 numpy
 mediapipe==0.10.1
-msvc-runtime
 scikit-learn
-pickle5

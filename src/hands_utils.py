@@ -5,7 +5,10 @@ from mediapipe.python.solutions import hands as h
 from mediapipe.python.solutions import drawing_utils
 import mediapipe as mp
 
+from typing import List, Tuple
+
 from aritmethic import Point2D, Line2D
+from exceptions import InvalidPathException, VideoReadingException
 
 import pandas as pd
 import time
@@ -81,7 +84,10 @@ class HandDetector():
     """
     parser creates a readable dict
     """        
-    def parser(self, hands_land_marks: dict, shape: tuple[int, int, int] = None, draw: bool = True) -> dict:
+    def parser(self,
+               hands_land_marks: dict,
+               shape: Tuple[int, int, int] = None,
+               draw: bool = True) -> dict:
         data: dict = {}
         if hands_land_marks:
             for hand_n, handMark in enumerate(hands_land_marks):
@@ -102,7 +108,8 @@ class HandDetector():
     """
     hand_stats receive a dict from the parser
     """                
-    def hand_stats(self, hands_positions: dict) -> dict:
+    def hand_stats(self,
+                   hands_positions: dict) -> dict:
         kk = time.time()
         detected_hands: list = hands_positions.keys()
         stats: dict = {}
@@ -146,7 +153,9 @@ class HandDetector():
         
         return stats           
             
-    def predict_hands_position(self, rgb_img: MatLike, draw: bool = True) -> dict:
+    def predict_hands_position(self,
+                               rgb_img: MatLike,
+                               draw: bool = True) -> dict:
         res: dict = self.land_marks(rgb_img)
     
         self.drawer(res, rgb_img) if draw else ...
@@ -168,58 +177,148 @@ class HandDetector():
             
         return detections
         
-           
-def create_dataset_on_videocapture(POSITION: str) -> None:         
-    ABS: str = os.getcwd()
-    OUTPUT_PATH: str = os.path.join(ABS, 'output')
-    if not os.path.exists(OUTPUT_PATH):
-        os.mkdir(OUTPUT_PATH)
+class HandsDataset:
+    def __init__(self, data_frame: pd.DataFrame, position_name: str) -> None:
+        self.data_frame = data_frame.reset_index(drop=True)
+        self.position_name = position_name
         
-    df = pd.DataFrame()
+    def export_dataset_to_csv(self, path: str) -> None:
+        if type(path) != str: raise InvalidPathException
+        if not os.path.exists(path): raise InvalidPathException
+        
+        self.data_frame.to_csv(path)
     
-    video = cv.VideoCapture(1)
-    hands = HandDetector(static_image_mode=False ,max_hands=2, min_det_confidence=.1)
-
-    while True:
-        success, img = video.read()
-        rgb = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+class RandomForestClassifierConfig:
+    def __init__(self, n_estimators: int,
+                 random_state: int,
+                 test_size: float,
+                 train_split_random_state: int) -> None:
+        self.n_estimators = n_estimators
+        self.random_state = random_state
+        self.test_size = test_size
+        self.train_split_random_state = train_split_random_state
         
-        res: dict = hands.land_marks(rgb)
-        hands.drawer(res, img)
+class HandsTrainingResult:
+    def __init__(self, accuracy: float, report: str | dict) -> None:
+        self.accuracy = round(accuracy, 2)
+        self.report = report
+        
+    def print_all(self) -> None:
+        print(f"Accuracy: {self.accuracy}")
+        print("Classification Report:\n", self.report)
+
+class HandPositionTraining:
+    @staticmethod
+    def create_dataset_on_videocapture(position_name: str) -> HandsDataset:         
+        df: pd.DataFrame = pd.DataFrame()
+        
+        video = cv.VideoCapture(1)
+        hands = HandDetector(static_image_mode=False ,max_hands=2, min_det_confidence=.1)
+
+        while True:
+            _, img = video.read()
+            rgb = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+            
+            res: dict = hands.land_marks(rgb)
+            hands.drawer(res, img)
+        
+            parse = hands.parser(res)#, img.shape)
+            data: dict = hands.hand_stats(parse)
+            hands_in_data: list = data.keys()
+            
+            for hand in hands_in_data:
+                data_hand: dict = data[hand]
+                data_hand['POS'] = position_name
+                if data_hand != {'POS': position_name}:
+                    df = pd.concat([pd.DataFrame([data_hand]), df])
+            
+            cv.imshow("video", img)
+            if cv.waitKey(1) != -1:
+                cv.destroyAllWindows()
+                break
+            
+        return HandsDataset(df)
+
+    @staticmethod
+    def create_dataset_on_video(position_name: str,
+                                video_path: str) -> HandsDataset:         
+        if not os.path.exists(video_path): raise InvalidPathException
+        
+        df: pd.DataFrame = pd.DataFrame()
+        
+        video = cv.VideoCapture(video_path)
+        hands = HandDetector(static_image_mode=False ,max_hands=2, min_det_confidence=.1)
+
+        if not video.isOpened(): raise VideoReadingException
+
+        while video.isOpend():
+            _, img = video.read()
+            rgb = cv.cvtColor(img, cv.COLOR_BGR2RGB)
+            
+            res: dict = hands.land_marks(rgb)
+            hands.drawer(res, img)
+        
+            parse = hands.parser(res)#, img.shape)
+            data: dict = hands.hand_stats(parse)
+            hands_in_data: list = data.keys()
+            
+            for hand in hands_in_data:
+                data_hand: dict = data[hand]
+                data_hand['POS'] = position_name
+                if data_hand != {'POS': position_name}:
+                    df = pd.concat([pd.DataFrame([data_hand]), df])
+            
+        return HandsDataset(df)
     
-        parse = hands.parser(res)#, img.shape)
-        data: dict = hands.hand_stats(parse)
-        hands_in_data: list = data.keys()
+    @staticmethod
+    def train_model(datasets: List[HandsDataset],
+                    output_path: str,
+                    random_forest_config: RandomForestClassifierConfig = None) -> HandsTrainingResult:
+        if not os.path.exists(output_path): raise InvalidPathException
         
-        for hand in hands_in_data:
-            data_hand: dict = data[hand]
-            data_hand['POS'] = POSITION
-            if data_hand != {'POS': POSITION}:
-                df = pd.concat([pd.DataFrame([data_hand]), df])
+        from sklearn.model_selection import train_test_split
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.model_selection import GridSearchCV
+        from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+        import pickle
         
-        cv.imshow("video", img)
-        if cv.waitKey(1) != -1:
-            cv.destroyAllWindows()
-            break
-    df.to_csv(f'output/{POSITION}.csv')
-    
-def test_model() -> None:
-    video = cv.VideoCapture(1)
-    hands = HandDetector(static_image_mode=False ,max_hands=2, min_det_confidence=.1)
+        dataframe: pd.DataFrame = pd.DataFrame()
 
-    while True:
-        success, img = video.read()
-        rgb = cv.cvtColor(img, cv.COLOR_BGR2RGB)
-        
-        positions: dict = hands.predict_hands_position(rgb)
-        
-        print(positions)
-        
-        cv.imshow("video", cv.cvtColor(rgb, cv.COLOR_RGB2BGR))
-        if cv.waitKey(1) != -1:
-            cv.destroyAllWindows()
-            break
+        if random_forest_config is None:
+            random_forest_config = RandomForestClassifierConfig(n_estimators=100,
+                                                                random_state=42,
+                                                                test_size=0.2,
+                                                                train_split_random_state=42)
 
-if __name__ == '__main__':
-    test_model()
-    #create_dataset_on_videocapture('HANDS_GUN')
+        for temp_dataframe in datasets:
+            dataframe = pd.concat([dataframe,
+                                   temp_dataframe.data_frame])
+        
+        try:
+            dataframe = dataframe.drop('Unnamed: 0', axis=1);
+        except:
+            pass
+        
+        X = dataframe.drop('POS', axis=1)  # Features
+        y = dataframe['POS']  # Labels
+        
+        X_train, X_test, y_train, y_test = train_test_split(X,
+                                                            y,
+                                                            random_forest_config.test_size,
+                                                            random_forest_config.train_split_random_state)
+        
+        rf_classifier = RandomForestClassifier(n_estimators=random_forest_config.n_estimators,
+                                               random_state=random_forest_config.random_state)
+
+        # Train the classifier on the training data
+        rf_classifier.fit(X_train.values, y_train.values)
+        
+        y_pred = rf_classifier.predict(X_test)
+        
+        with open('hands_model.pkl', 'wb') as model_file:
+            pickle.dump(rf_classifier, model_file)
+
+        accuracy = accuracy_score(y_test, y_pred)
+        report = classification_report(y_test, y_pred)
+        
+        return HandsTrainingResult(accuracy, report)
